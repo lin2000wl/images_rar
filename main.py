@@ -13,7 +13,8 @@ from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QGridLayout, QPushButton, QLabel, 
                            QMenuBar, QStatusBar, QAction, QMessageBox, QFileDialog,
-                           QRadioButton, QButtonGroup, QGroupBox, QProgressDialog)
+                           QRadioButton, QButtonGroup, QGroupBox, QProgressDialog,
+                           QProgressBar)
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, pyqtSignal as Signal
 from PyQt5.QtGui import QIcon, QFont
 from file_scanner import ImageScanner
@@ -268,6 +269,10 @@ class MainWindow(QMainWindow):
         self.create_output_options()
         main_layout.addWidget(self.output_options_group)
         
+        # 添加进度显示区域
+        self.create_progress_area()
+        main_layout.addWidget(self.progress_widget)
+        
         # 添加状态显示区域
         self.status_label = QLabel("请选择包含图片的文件夹")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -292,6 +297,84 @@ class MainWindow(QMainWindow):
         # 初始化菜单栏和状态栏
         self.init_menu_bar()
         self.init_status_bar()
+        
+    def create_progress_area(self):
+        """创建进度显示区域"""
+        # 创建进度显示容器
+        self.progress_widget = QWidget()
+        self.progress_widget.setStyleSheet("""
+            QWidget {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                padding: 10px;
+                margin: 5px 0px;
+            }
+        """)
+        
+        # 创建布局
+        progress_layout = QVBoxLayout()
+        progress_layout.setContentsMargins(15, 10, 15, 10)
+        progress_layout.setSpacing(8)
+        
+        # 进度文本标签
+        self.progress_text_label = QLabel("就绪")
+        self.progress_text_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                font-weight: bold;
+                color: #495057;
+                background: none;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+        """)
+        self.progress_text_label.setAlignment(Qt.AlignCenter)
+        
+        # 进度条
+        self.main_progress_bar = QProgressBar()
+        self.main_progress_bar.setMinimum(0)
+        self.main_progress_bar.setMaximum(100)
+        self.main_progress_bar.setValue(0)
+        self.main_progress_bar.setTextVisible(True)
+        self.main_progress_bar.setFormat("%p%")
+        
+        # 设置进度条样式
+        self.main_progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #dee2e6;
+                border-radius: 8px;
+                background-color: #ffffff;
+                text-align: center;
+                font-size: 12px;
+                font-weight: bold;
+                color: #495057;
+                height: 25px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #28a745, stop:1 #20c997);
+                border-radius: 6px;
+                margin: 2px;
+            }
+            QProgressBar[error="true"] {
+                border-color: #dc3545;
+            }
+            QProgressBar[error="true"]::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #dc3545, stop:1 #c82333);
+            }
+        """)
+        
+        # 添加到布局
+        progress_layout.addWidget(self.progress_text_label)
+        progress_layout.addWidget(self.main_progress_bar)
+        
+        self.progress_widget.setLayout(progress_layout)
+        
+        # 初始状态下隐藏进度区域
+        self.progress_widget.setVisible(False)
         
     def create_output_options(self):
         """创建输出选项单选按钮组"""
@@ -637,6 +720,13 @@ class MainWindow(QMainWindow):
             self.compress_btn.setEnabled(False)
             self.select_folder_btn.setEnabled(False)
             
+            # 显示并初始化主界面进度区域
+            self.progress_widget.setVisible(True)
+            self.main_progress_bar.setValue(0)
+            self.main_progress_bar.setProperty("error", False)
+            self.main_progress_bar.setStyleSheet(self.main_progress_bar.styleSheet())  # 刷新样式
+            self.progress_text_label.setText("准备压缩...")
+            
             # 创建进度对话框
             self.progress_dialog = QProgressDialog("准备压缩...", "取消", 0, 100, self)
             self.progress_dialog.setWindowTitle("压缩进度")
@@ -666,19 +756,60 @@ class MainWindow(QMainWindow):
     
     def on_compression_progress(self, progress, current_file):
         """压缩进度更新"""
+        # 更新弹窗进度条
         self.progress_dialog.setValue(progress)
         self.progress_dialog.setLabelText(f"正在压缩: {current_file}")
+        
+        # 更新主界面进度条
+        self.main_progress_bar.setValue(progress)
+        
+        # 更新进度文本（显示文件名和进度）
+        if hasattr(self, 'compression_worker') and self.compression_worker:
+            total_files = len(self.compression_worker.image_files)
+            # 更精确的当前文件索引计算
+            if progress >= 100:
+                current_index = total_files
+            else:
+                current_index = max(1, int((progress / 100) * total_files) + 1)
+            self.progress_text_label.setText(f"正在压缩: {current_file} ({current_index}/{total_files})")
+        else:
+            self.progress_text_label.setText(f"正在压缩: {current_file}")
+        
+        # 更新状态栏
         self.statusBar().showMessage(f'压缩进度: {progress}% - {current_file}')
     
     def on_compression_finished(self, results):
         """压缩完成处理"""
         self.progress_dialog.close()
-        self.reset_compression_ui()
         
-        # 显示结果
+        # 更新主界面进度条为完成状态
         total = results['total_files']
         successful = results['successful']
         failed = results['failed']
+        
+        # 设置进度条为100%
+        self.main_progress_bar.setValue(100)
+        
+        # 根据结果设置不同的状态文本和颜色
+        if failed == 0:
+            # 全部成功
+            self.progress_text_label.setText(f"压缩完成：成功 {successful} 张")
+            self.main_progress_bar.setProperty("error", False)
+        elif successful > 0:
+            # 部分成功
+            self.progress_text_label.setText(f"压缩完成：成功 {successful} 张，失败 {failed} 张")
+            self.main_progress_bar.setProperty("error", False)
+        else:
+            # 全部失败
+            self.progress_text_label.setText(f"压缩失败：失败 {failed} 张")
+            self.main_progress_bar.setProperty("error", True)
+        
+        # 刷新进度条样式
+        self.main_progress_bar.setStyleSheet(self.main_progress_bar.styleSheet())
+        
+        self.reset_compression_ui()
+        
+        # 显示结果
         
         # 构建结果消息
         result_msg = f"压缩完成！\n\n"
@@ -715,6 +846,12 @@ class MainWindow(QMainWindow):
     def on_compression_error(self, error_message):
         """压缩错误处理"""
         self.progress_dialog.close()
+        
+        # 设置主界面进度条为错误状态
+        self.progress_text_label.setText("压缩发生错误")
+        self.main_progress_bar.setProperty("error", True)
+        self.main_progress_bar.setStyleSheet(self.main_progress_bar.styleSheet())
+        
         self.reset_compression_ui()
         QMessageBox.critical(self, '压缩错误', error_message)
         self.statusBar().showMessage('压缩失败')
@@ -725,6 +862,12 @@ class MainWindow(QMainWindow):
             self.compression_worker.requestInterruption()
             self.compression_worker.wait(3000)  # 等待3秒
         
+        # 更新主界面进度条为取消状态
+        self.progress_text_label.setText("压缩已取消")
+        self.main_progress_bar.setValue(0)
+        self.main_progress_bar.setProperty("error", False)
+        self.main_progress_bar.setStyleSheet(self.main_progress_bar.styleSheet())
+        
         self.reset_compression_ui()
         self.statusBar().showMessage('压缩已取消')
     
@@ -732,6 +875,23 @@ class MainWindow(QMainWindow):
         """重置压缩相关的UI状态"""
         self.compress_btn.setEnabled(True)
         self.select_folder_btn.setEnabled(True)
+        
+        # 5秒后隐藏进度区域（让用户能看到最终结果）
+        from PyQt5.QtCore import QTimer
+        if not hasattr(self, 'hide_progress_timer'):
+            self.hide_progress_timer = QTimer()
+            self.hide_progress_timer.setSingleShot(True)
+            self.hide_progress_timer.timeout.connect(self.hide_progress_area)
+        
+        self.hide_progress_timer.start(5000)  # 5秒后隐藏
+    
+    def hide_progress_area(self):
+        """隐藏进度区域并重置状态"""
+        self.progress_widget.setVisible(False)
+        self.progress_text_label.setText("就绪")
+        self.main_progress_bar.setValue(0)
+        self.main_progress_bar.setProperty("error", False)
+        self.main_progress_bar.setStyleSheet(self.main_progress_bar.styleSheet())
         
     def show_about(self):
         """显示关于对话框"""
