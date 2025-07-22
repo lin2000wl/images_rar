@@ -7,14 +7,157 @@
 
 import sys
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QGridLayout, QPushButton, QLabel, 
                            QMenuBar, QStatusBar, QAction, QMessageBox, QFileDialog,
-                           QRadioButton, QButtonGroup, QGroupBox)
-from PyQt5.QtCore import Qt, pyqtSignal
+                           QRadioButton, QButtonGroup, QGroupBox, QProgressDialog)
+from PyQt5.QtCore import Qt, pyqtSignal, QThread, pyqtSignal as Signal
 from PyQt5.QtGui import QIcon, QFont
 from file_scanner import ImageScanner
+from image_compressor import ImageCompressor
+
+
+class CompressionWorker(QThread):
+    """压缩工作线程"""
+    
+    # 信号定义
+    progress_updated = Signal(int, str)  # 进度百分比，当前文件名
+    compression_finished = Signal(dict)  # 压缩完成，结果字典
+    error_occurred = Signal(str)  # 发生错误
+    
+    def __init__(self, image_files, output_mode, compressor):
+        super().__init__()
+        self.image_files = image_files
+        self.output_mode = output_mode  # "replace" or "create_new"
+        self.compressor = compressor
+        self.results = {
+            'total_files': len(image_files),
+            'successful': 0,
+            'failed': 0,
+            'errors': [],
+            'details': []
+        }
+        
+    def run(self):
+        """执行压缩任务"""
+        try:
+            total_files = len(self.image_files)
+            
+            for index, image_path in enumerate(self.image_files):
+                if self.isInterruptionRequested():
+                    break
+                    
+                # 更新进度
+                progress = int((index / total_files) * 100)
+                file_name = Path(image_path).name
+                self.progress_updated.emit(progress, file_name)
+                
+                try:
+                    if self.output_mode == "replace":
+                        success = self._compress_replace_original(image_path)
+                    else:  # create_new
+                        success = self._compress_create_new(image_path)
+                    
+                    if success:
+                        self.results['successful'] += 1
+                    else:
+                        self.results['failed'] += 1
+                        
+                except Exception as e:
+                    self.results['failed'] += 1
+                    error_msg = f"{file_name}: {str(e)}"
+                    self.results['errors'].append(error_msg)
+            
+            # 完成进度
+            self.progress_updated.emit(100, "压缩完成")
+            self.compression_finished.emit(self.results)
+            
+        except Exception as e:
+            self.error_occurred.emit(f"压缩过程中发生严重错误: {str(e)}")
+    
+    def _compress_replace_original(self, image_path):
+        """替换原图模式的压缩"""
+        try:
+            # 创建临时文件
+            temp_dir = tempfile.gettempdir()
+            temp_name = f"compressed_{Path(image_path).stem}_{os.getpid()}.jpg"
+            temp_path = os.path.join(temp_dir, temp_name)
+            
+            # 压缩到临时文件
+            result = self.compressor.compress_single_image(image_path, temp_path)
+            
+            # 创建备份（以防万一）
+            backup_path = image_path + ".backup"
+            shutil.copy2(image_path, backup_path)
+            
+            try:
+                # 替换原文件
+                shutil.move(temp_path, image_path)
+                
+                # 删除备份
+                os.remove(backup_path)
+                
+                # 记录详情
+                self.results['details'].append({
+                    'file': image_path,
+                    'mode': 'replace',
+                    'original_size': result['original_size_bytes'],
+                    'final_size': result['final_size_bytes'],
+                    'compression_ratio': result['compression_ratio']
+                })
+                
+                return True
+                
+            except Exception as e:
+                # 恢复备份
+                if os.path.exists(backup_path):
+                    shutil.move(backup_path, image_path)
+                raise e
+                
+        except Exception as e:
+            # 清理临时文件
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            raise e
+    
+    def _compress_create_new(self, image_path):
+        """生成新文件模式的压缩"""
+        try:
+            # 生成新文件名
+            path_obj = Path(image_path)
+            new_name = f"{path_obj.stem}_compressed{path_obj.suffix}"
+            new_path = path_obj.parent / new_name
+            
+            # 如果新文件已存在，添加数字后缀
+            counter = 1
+            while new_path.exists():
+                new_name = f"{path_obj.stem}_compressed_{counter}{path_obj.suffix}"
+                new_path = path_obj.parent / new_name
+                counter += 1
+            
+            # 压缩到新文件
+            result = self.compressor.compress_single_image(image_path, str(new_path))
+            
+            # 记录详情
+            self.results['details'].append({
+                'file': image_path,
+                'new_file': str(new_path),
+                'mode': 'create_new',
+                'original_size': result['original_size_bytes'],
+                'final_size': result['final_size_bytes'],
+                'compression_ratio': result['compression_ratio']
+            })
+            
+            return True
+            
+        except Exception as e:
+            raise e
 
 
 class MainWindow(QMainWindow):
@@ -25,6 +168,7 @@ class MainWindow(QMainWindow):
         # 初始化实例变量
         self.selected_folder = None
         self.image_scanner = ImageScanner(min_size_kb=100)
+        self.image_compressor = ImageCompressor(target_size_kb=100)
         self.image_files = []
         
         self.init_ui()
@@ -435,9 +579,159 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('就绪')
 
     def compress_clicked(self):
-        """开始压缩按钮点击事件（占位逻辑）"""
-        self.statusBar().showMessage('压缩功能待实现...')
-        QMessageBox.information(self, '信息', '图片压缩功能将在后续任务中实现')
+        """开始压缩按钮点击事件"""
+        try:
+            # 检查是否有选择的图片文件
+            if not self.image_files:
+                QMessageBox.warning(self, '警告', '请先选择包含图片的文件夹')
+                return
+            
+            # 获取用户选择的输出模式
+            output_mode = self.get_output_mode()
+            
+            # 确认对话框
+            mode_text = "替换原图" if output_mode == "replace" else "生成新文件"
+            file_count = len(self.image_files)
+            
+            reply = QMessageBox.question(
+                self, 
+                '确认压缩',
+                f'即将压缩 {file_count} 张图片\n'
+                f'输出模式：{mode_text}\n'
+                f'目标大小：100KB以内\n\n'
+                f'确定要开始压缩吗？',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply != QMessageBox.Yes:
+                return
+            
+            # 特殊警告：替换原图模式
+            if output_mode == "replace":
+                warning_reply = QMessageBox.warning(
+                    self,
+                    '重要警告',
+                    '⚠️ 替换原图模式将会覆盖您的原始图片文件！\n\n'
+                    '为了您的数据安全，建议：\n'
+                    '• 确保您已备份重要图片\n'
+                    '• 或者选择"生成新文件"模式\n\n'
+                    '确定要继续替换原图吗？',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if warning_reply != QMessageBox.Yes:
+                    return
+            
+            # 开始压缩
+            self.start_compression(output_mode)
+            
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'启动压缩时发生错误：\n{str(e)}')
+    
+    def start_compression(self, output_mode):
+        """启动压缩过程"""
+        try:
+            # 禁用相关按钮
+            self.compress_btn.setEnabled(False)
+            self.select_folder_btn.setEnabled(False)
+            
+            # 创建进度对话框
+            self.progress_dialog = QProgressDialog("准备压缩...", "取消", 0, 100, self)
+            self.progress_dialog.setWindowTitle("压缩进度")
+            self.progress_dialog.setWindowModality(Qt.WindowModal)
+            self.progress_dialog.setMinimumDuration(0)
+            self.progress_dialog.show()
+            
+            # 创建工作线程
+            self.compression_worker = CompressionWorker(
+                self.image_files, 
+                output_mode, 
+                self.image_compressor
+            )
+            
+            # 连接信号
+            self.compression_worker.progress_updated.connect(self.on_compression_progress)
+            self.compression_worker.compression_finished.connect(self.on_compression_finished)
+            self.compression_worker.error_occurred.connect(self.on_compression_error)
+            self.progress_dialog.canceled.connect(self.on_compression_canceled)
+            
+            # 启动线程
+            self.compression_worker.start()
+            
+        except Exception as e:
+            self.reset_compression_ui()
+            QMessageBox.critical(self, '错误', f'启动压缩线程时发生错误：\n{str(e)}')
+    
+    def on_compression_progress(self, progress, current_file):
+        """压缩进度更新"""
+        self.progress_dialog.setValue(progress)
+        self.progress_dialog.setLabelText(f"正在压缩: {current_file}")
+        self.statusBar().showMessage(f'压缩进度: {progress}% - {current_file}')
+    
+    def on_compression_finished(self, results):
+        """压缩完成处理"""
+        self.progress_dialog.close()
+        self.reset_compression_ui()
+        
+        # 显示结果
+        total = results['total_files']
+        successful = results['successful']
+        failed = results['failed']
+        
+        # 构建结果消息
+        result_msg = f"压缩完成！\n\n"
+        result_msg += f"总计文件：{total} 张\n"
+        result_msg += f"成功压缩：{successful} 张\n"
+        result_msg += f"失败：{failed} 张\n"
+        
+        if results['details']:
+            total_original = sum(d['original_size'] for d in results['details'])
+            total_final = sum(d['final_size'] for d in results['details'])
+            if total_original > 0:
+                overall_ratio = total_original / total_final
+                saved_space = (total_original - total_final) / (1024 * 1024)  # MB
+                result_msg += f"\n总压缩比：{overall_ratio:.2f}x\n"
+                result_msg += f"节省空间：{saved_space:.1f} MB"
+        
+        if results['errors']:
+            result_msg += f"\n\n错误详情：\n"
+            for error in results['errors'][:5]:  # 最多显示5个错误
+                result_msg += f"• {error}\n"
+            if len(results['errors']) > 5:
+                result_msg += f"... 还有 {len(results['errors']) - 5} 个错误"
+        
+        # 根据结果选择消息框类型
+        if failed == 0:
+            QMessageBox.information(self, '压缩成功', result_msg)
+        elif successful > 0:
+            QMessageBox.warning(self, '部分成功', result_msg)
+        else:
+            QMessageBox.critical(self, '压缩失败', result_msg)
+        
+        self.statusBar().showMessage(f'压缩完成：成功 {successful}/{total}')
+    
+    def on_compression_error(self, error_message):
+        """压缩错误处理"""
+        self.progress_dialog.close()
+        self.reset_compression_ui()
+        QMessageBox.critical(self, '压缩错误', error_message)
+        self.statusBar().showMessage('压缩失败')
+    
+    def on_compression_canceled(self):
+        """用户取消压缩"""
+        if hasattr(self, 'compression_worker') and self.compression_worker.isRunning():
+            self.compression_worker.requestInterruption()
+            self.compression_worker.wait(3000)  # 等待3秒
+        
+        self.reset_compression_ui()
+        self.statusBar().showMessage('压缩已取消')
+    
+    def reset_compression_ui(self):
+        """重置压缩相关的UI状态"""
+        self.compress_btn.setEnabled(True)
+        self.select_folder_btn.setEnabled(True)
         
     def show_about(self):
         """显示关于对话框"""
