@@ -10,7 +10,8 @@ import os
 from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QGridLayout, QPushButton, QLabel, 
-                           QMenuBar, QStatusBar, QAction, QMessageBox, QFileDialog)
+                           QMenuBar, QStatusBar, QAction, QMessageBox, QFileDialog,
+                           QRadioButton, QButtonGroup, QGroupBox)
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon, QFont
 from file_scanner import ImageScanner
@@ -119,6 +120,10 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(button_widget)
         
+        # 添加输出选项单选按钮组
+        self.create_output_options()
+        main_layout.addWidget(self.output_options_group)
+        
         # 添加状态显示区域
         self.status_label = QLabel("请选择包含图片的文件夹")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -143,6 +148,113 @@ class MainWindow(QMainWindow):
         # 初始化菜单栏和状态栏
         self.init_menu_bar()
         self.init_status_bar()
+        
+    def create_output_options(self):
+        """创建输出选项单选按钮组"""
+        # 创建分组框
+        self.output_options_group = QGroupBox("输出选项")
+        self.output_options_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                color: #2c3e50;
+                border: 2px solid #bdc3c7;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                background-color: white;
+            }
+        """)
+        
+        # 创建布局
+        options_layout = QVBoxLayout(self.output_options_group)
+        options_layout.setSpacing(10)
+        options_layout.setContentsMargins(20, 20, 20, 15)
+        
+        # 创建按钮组（确保只能选择一个）
+        self.output_button_group = QButtonGroup()
+        
+        # 创建"替换原图"单选按钮（默认选中）
+        self.replace_original_radio = QRadioButton("替换原图（覆盖原始文件）")
+        self.replace_original_radio.setChecked(True)  # 默认选中
+        self.replace_original_radio.setStyleSheet("""
+            QRadioButton {
+                font-size: 12px;
+                color: #2c3e50;
+                padding: 5px;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QRadioButton::indicator::unchecked {
+                border: 2px solid #bdc3c7;
+                border-radius: 8px;
+                background-color: white;
+            }
+            QRadioButton::indicator::checked {
+                border: 2px solid #3498db;
+                border-radius: 8px;
+                background-color: #3498db;
+            }
+        """)
+        
+        # 创建"生成新文件"单选按钮
+        self.create_new_radio = QRadioButton("生成新文件（保留原始文件，创建压缩版本）")
+        self.create_new_radio.setStyleSheet("""
+            QRadioButton {
+                font-size: 12px;
+                color: #2c3e50;
+                padding: 5px;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QRadioButton::indicator::unchecked {
+                border: 2px solid #bdc3c7;
+                border-radius: 8px;
+                background-color: white;
+            }
+            QRadioButton::indicator::checked {
+                border: 2px solid #27ae60;
+                border-radius: 8px;
+                background-color: #27ae60;
+            }
+        """)
+        
+        # 将单选按钮添加到按钮组
+        self.output_button_group.addButton(self.replace_original_radio, 0)
+        self.output_button_group.addButton(self.create_new_radio, 1)
+        
+        # 将单选按钮添加到布局
+        options_layout.addWidget(self.replace_original_radio)
+        options_layout.addWidget(self.create_new_radio)
+        
+        # 连接信号（可选：用于响应选择变化）
+        self.output_button_group.buttonToggled.connect(self.on_output_option_changed)
+        
+    def on_output_option_changed(self, button, checked):
+        """输出选项改变时的回调函数"""
+        if checked:
+            if button == self.replace_original_radio:
+                self.statusBar().showMessage('已选择：替换原图模式')
+            elif button == self.create_new_radio:
+                self.statusBar().showMessage('已选择：生成新文件模式')
+                
+    def get_output_mode(self):
+        """获取当前选择的输出模式"""
+        if self.replace_original_radio.isChecked():
+            return "replace"
+        elif self.create_new_radio.isChecked():
+            return "create_new"
+        else:
+            return "replace"  # 默认值
         
     def init_menu_bar(self):
         """初始化菜单栏"""
